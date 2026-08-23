@@ -1,0 +1,175 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: idp-java-service
+  title: Java Service
+  description: Create a Java service with deployment settings for the IDP.
+  tags:
+    - java
+    - spring-boot
+    - service
+spec:
+  owner: group:platform-engineering
+  type: service
+  parameters:
+    - title: Service details
+      required:
+        - applicationName
+        - owner
+        - environment
+        - targetCluster
+        - namespace
+      properties:
+        applicationName:
+          title: Application name
+          type: string
+          description: Lowercase Kubernetes-compatible service name.
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          minLength: 2
+          maxLength: 40
+          ui:autofocus: true
+        owner:
+          title: Owner team
+          type: string
+          enum:
+            - group:application-team
+            - group:platform-team
+          enumNames:
+            - Application team
+            - Platform team
+        environment:
+          title: Environment
+          type: string
+          enum:
+            - dev
+            - qa
+            - prod
+        targetCluster:
+          title: Target EKS cluster
+          type: string
+          enum:
+            - idp-dev-eks
+          enumNames:
+            - idp-dev-eks
+        namespace:
+          title: Kubernetes namespace
+          type: string
+          description: Namespace to create or use for this service.
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          minLength: 2
+          maxLength: 63
+    - title: Runtime and capacity
+      required:
+        - runtime
+        - replicas
+        - cpu
+        - memory
+        - ingress
+        - hpa
+      properties:
+        runtime:
+          title: Language and runtime
+          type: string
+          enum:
+            - '17'
+            - '21'
+            - '25'
+          enumNames:
+            - Java 17
+            - Java 21
+            - Java 25
+        replicas:
+          title: Replicas
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 2
+        cpu:
+          title: CPU request
+          type: string
+          enum:
+            - 250m
+            - 500m
+            - 1000m
+          default: 500m
+        memory:
+          title: Memory request
+          type: string
+          enum:
+            - 256Mi
+            - 512Mi
+            - 1Gi
+          default: 512Mi
+        ingress:
+          title: Enable ingress
+          type: boolean
+          default: false
+        hpa:
+          title: Enable horizontal pod autoscaling
+          type: boolean
+          default: false
+    - title: Repository
+      required:
+        - repoUrl
+      properties:
+        repoUrl:
+          title: New GitHub repository
+          type: string
+          description: Choose the organization and enter the new repository name.
+          ui:field: RepoUrlPicker
+          ui:options:
+            allowedHosts:
+              - github.com
+  steps:
+    - id: fetch-base
+      name: Fetch service starter
+      action: fetch:template
+      input:
+        url: ./content
+        values:
+          applicationName: ${{ parameters.applicationName }}
+          owner: ${{ parameters.owner }}
+          environment: ${{ parameters.environment }}
+          targetCluster: ${{ parameters.targetCluster }}
+          namespace: ${{ parameters.namespace }}
+          runtime: ${{ parameters.runtime }}
+          replicas: ${{ parameters.replicas }}
+          cpu: ${{ parameters.cpu }}
+          memory: ${{ parameters.memory }}
+          ingress: ${{ parameters.ingress }}
+          hpa: ${{ parameters.hpa }}
+    - id: publish
+      name: Create GitHub repository
+      action: publish:github
+      input:
+        description: ${{ parameters.applicationName }} service created by Backstage
+        repoUrl: ${{ parameters.repoUrl }}
+        defaultBranch: main
+    - id: provision
+      name: Provision AWS and configure CI
+      action: idp:provision-service
+      input:
+        appRepoUrl: ${{ parameters.repoUrl }}
+        applicationName: ${{ parameters.applicationName }}
+        environment: ${{ parameters.environment }}
+        runtime: ${{ parameters.runtime }}
+        targetCluster: ${{ parameters.targetCluster }}
+        namespace: ${{ parameters.namespace }}
+        replicas: ${{ parameters.replicas }}
+        cpu: ${{ parameters.cpu }}
+        memory: ${{ parameters.memory }}
+        ingress: ${{ parameters.ingress }}
+        hpa: ${{ parameters.hpa }}
+    - id: register
+      name: Register service in catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps.publish.output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps.register.output.entityRef }}

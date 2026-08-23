@@ -1,0 +1,193 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '${{ values.runtime }}'
+          cache: maven
+      - run: mvn --batch-mode test
+
+  build-and-push:
+    if: ${{ '${{' }} github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ '${{' }} vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ '${{' }} vars.AWS_ROLE_ARN }}
+      ECR_REPOSITORY: ${{ '${{' }} github.event.repository.name }}
+      IMAGE_TAG: ${{ '${{' }} github.sha }}
+      GITOPS_REPOSITORY: ${{ '${{' }} vars.GITOPS_REPOSITORY }}
+      APP_NAMESPACE: ${{ '${{' }} vars.APP_NAMESPACE }}
+      APP_ENVIRONMENT: ${{ '${{' }} vars.APP_ENVIRONMENT }}
+      APP_CLUSTER: ${{ '${{' }} vars.APP_CLUSTER }}
+      APP_REPLICAS: ${{ '${{' }} vars.APP_REPLICAS }}
+      APP_CPU: ${{ '${{' }} vars.APP_CPU }}
+      APP_MEMORY: ${{ '${{' }} vars.APP_MEMORY }}
+      APP_INGRESS: ${{ '${{' }} vars.APP_INGRESS }}
+      APP_HPA: ${{ '${{' }} vars.APP_HPA }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ '${{' }} env.AWS_REGION }}
+          role-to-assume: ${{ '${{' }} env.AWS_ROLE_ARN }}
+          role-session-name: ${{ '${{' }} github.event.repository.name }}-${{ '${{' }} github.run_id }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+      - name: Build and push immutable image
+        env:
+          ECR_REGISTRY: ${{ '${{' }} steps.ecr-login.outputs.registry }}
+        run: |
+          docker build --tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      - name: Clone GitOps repository
+        env:
+          GITOPS_TOKEN: ${{ '${{' }} secrets.GITOPS_TOKEN }}
+        run: git clone "https://x-access-token:${GITOPS_TOKEN}@github.com/${GITOPS_REPOSITORY}.git" IDP-GitOps
+      - name: Update GitOps image
+        env:
+          ECR_REGISTRY: ${{ '${{' }} steps.ecr-login.outputs.registry }}
+          GITOPS_TOKEN: ${{ '${{' }} secrets.GITOPS_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${GITOPS_TOKEN:?GITOPS_TOKEN is required}"
+          : "${GITOPS_REPOSITORY:?GITOPS_REPOSITORY is required}"
+          : "${APP_NAMESPACE:?APP_NAMESPACE is required}"
+          : "${APP_ENVIRONMENT:?APP_ENVIRONMENT is required}"
+          : "${APP_CLUSTER:?APP_CLUSTER is required}"
+          : "${APP_REPLICAS:?APP_REPLICAS is required}"
+          : "${APP_CPU:?APP_CPU is required}"
+          : "${APP_MEMORY:?APP_MEMORY is required}"
+
+          gitops_path="IDP-GitOps/apps/$ECR_REPOSITORY/$APP_ENVIRONMENT"
+          mkdir -p "$gitops_path"
+
+          echo "Generating GitOps manifests for ${ECR_REPOSITORY} in ${gitops_path}"
+          cat > "$gitops_path/app.yaml" <<EOF
+          name: $ECR_REPOSITORY
+          environment: $APP_ENVIRONMENT
+          cluster: $APP_CLUSTER
+          namespace: $APP_NAMESPACE
+          EOF
+          cat > "$gitops_path/namespace.yaml" <<EOF
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: $APP_NAMESPACE
+          EOF
+          cat > "$gitops_path/deployment.yaml" <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: $ECR_REPOSITORY
+            namespace: $APP_NAMESPACE
+          spec:
+            replicas: $APP_REPLICAS
+            selector:
+              matchLabels:
+                app: $ECR_REPOSITORY
+            template:
+              metadata:
+                labels:
+                  app: $ECR_REPOSITORY
+              spec:
+                containers:
+                  - name: $ECR_REPOSITORY
+                    image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+                    ports:
+                      - containerPort: 8080
+                    resources:
+                      requests:
+                        cpu: $APP_CPU
+                        memory: $APP_MEMORY
+          EOF
+          cat > "$gitops_path/service.yaml" <<EOF
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: $ECR_REPOSITORY
+            namespace: $APP_NAMESPACE
+          spec:
+            selector:
+              app: $ECR_REPOSITORY
+            ports:
+              - port: 80
+                targetPort: 8080
+          EOF
+          if [ "$APP_INGRESS" = "true" ]; then
+            cat > "$gitops_path/ingress.yaml" <<EOF
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: $ECR_REPOSITORY
+            namespace: $APP_NAMESPACE
+          spec:
+            rules:
+              - host: $ECR_REPOSITORY.local
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: $ECR_REPOSITORY
+                          port:
+                            number: 80
+          EOF
+          fi
+          if [ "$APP_HPA" = "true" ]; then
+            cat > "$gitops_path/hpa.yaml" <<EOF
+          apiVersion: autoscaling/v2
+          kind: HorizontalPodAutoscaler
+          metadata:
+            name: $ECR_REPOSITORY
+            namespace: $APP_NAMESPACE
+          spec:
+            scaleTargetRef:
+              apiVersion: apps/v1
+              kind: Deployment
+              name: $ECR_REPOSITORY
+            minReplicas: 1
+            maxReplicas: 10
+            metrics:
+              - type: Resource
+                resource:
+                  name: cpu
+                  target:
+                    type: Utilization
+                    averageUtilization: 70
+          EOF
+          fi
+
+          cd IDP-GitOps
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+          git add .
+          git status --short
+
+          if git diff --cached --quiet; then
+            echo "No GitOps changes to commit."
+          else
+            git commit -m "Update ${ECR_REPOSITORY} image to ${IMAGE_TAG}"
+            git push origin HEAD:main
+          fi
