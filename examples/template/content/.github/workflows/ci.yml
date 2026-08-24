@@ -161,9 +161,13 @@ jobs:
           EOF
           if [ "$APP_INGRESS" = "true" ]; then
             : "${APP_ALB_SCHEME:?APP_ALB_SCHEME is required}"
-            : "${APP_INGRESS_HOST:?APP_INGRESS_HOST is required}"
             : "${APP_INGRESS_PATH:?APP_INGRESS_PATH is required}"
             : "${APP_INGRESS_SERVICE_PORT:?APP_INGRESS_SERVICE_PORT is required}"
+            if [ -n "${APP_INGRESS_HOST:-}" ]; then
+              host_rule="              - host: $APP_INGRESS_HOST"$'\n'"                http:"
+            else
+              host_rule="              - http:"
+            fi
             cat > "$gitops_path/ingress.yaml" <<EOF
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -176,8 +180,7 @@ jobs:
           spec:
             ingressClassName: alb
             rules:
-              - host: $APP_INGRESS_HOST
-                http:
+          ${host_rule}
                   paths:
                     - path: $APP_INGRESS_PATH
                       pathType: Prefix

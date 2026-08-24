@@ -111,7 +111,6 @@ spec:
     - title: Ingress
       required:
         - albScheme
-        - ingressHost
         - ingressPath
         - ingressServicePort
       properties:
@@ -126,9 +125,9 @@ spec:
             - Internet-facing
           default: internal
         ingressHost:
-          title: Host
+          title: Host (optional)
           type: string
-          description: Public hostname routed to this service, e.g. java-service.example.com.
+          description: Public hostname routed to this service, e.g. java-service.example.com. Leave blank to accept any host via the ALB's own DNS name.
         ingressPath:
           title: Path
           type: string
