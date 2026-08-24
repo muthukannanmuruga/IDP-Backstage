@@ -53,6 +53,14 @@ export const createIdpProvisionServiceAction = () =>
         memory: z => z.string(),
         ingress: z => z.boolean(),
         hpa: z => z.boolean(),
+        albScheme: z => z.enum(['internal', 'internet-facing']),
+        ingressHost: z => z.string(),
+        ingressPath: z => z.string(),
+        ingressServicePort: z => z.number().int().min(1).max(65535),
+        hpaMinReplicas: z => z.number().int().min(1),
+        hpaMaxReplicas: z => z.number().int().min(1),
+        hpaCpuTarget: z => z.number().int().min(1).max(100),
+        hpaMemoryTarget: z => z.number().int().min(1).max(100),
       },
       output: {
         terraformRunId: z => z.string(),
@@ -80,6 +88,10 @@ export const createIdpProvisionServiceAction = () =>
       const [infraOwner, infraName] = infraRepo.split('/');
       if (!infraOwner || !infraName) throw new Error(`Invalid IDP_INFRA_REPOSITORY: ${infraRepo}`);
 
+      if (ctx.input.hpaMaxReplicas < ctx.input.hpaMinReplicas) {
+        throw new Error('hpaMaxReplicas must be greater than or equal to hpaMinReplicas.');
+      }
+
       const startedAt = Date.now();
       const manifest = [
         `name: ${ctx.input.applicationName}`,
@@ -95,6 +107,14 @@ export const createIdpProvisionServiceAction = () =>
         `memory: ${ctx.input.memory}`,
         `ingress: ${ctx.input.ingress}`,
         `hpa: ${ctx.input.hpa}`,
+        `alb_scheme: ${ctx.input.albScheme}`,
+        `ingress_host: ${ctx.input.ingressHost}`,
+        `ingress_path: ${ctx.input.ingressPath}`,
+        `ingress_service_port: ${ctx.input.ingressServicePort}`,
+        `hpa_min_replicas: ${ctx.input.hpaMinReplicas}`,
+        `hpa_max_replicas: ${ctx.input.hpaMaxReplicas}`,
+        `hpa_cpu_target: ${ctx.input.hpaCpuTarget}`,
+        `hpa_memory_target: ${ctx.input.hpaMemoryTarget}`,
         '',
       ].join('\n');
 
@@ -154,6 +174,14 @@ export const createIdpProvisionServiceAction = () =>
         APP_MEMORY: ctx.input.memory,
         APP_INGRESS: String(ctx.input.ingress),
         APP_HPA: String(ctx.input.hpa),
+        APP_ALB_SCHEME: ctx.input.albScheme,
+        APP_INGRESS_HOST: ctx.input.ingressHost,
+        APP_INGRESS_PATH: ctx.input.ingressPath,
+        APP_INGRESS_SERVICE_PORT: String(ctx.input.ingressServicePort),
+        APP_HPA_MIN_REPLICAS: String(ctx.input.hpaMinReplicas),
+        APP_HPA_MAX_REPLICAS: String(ctx.input.hpaMaxReplicas),
+        APP_HPA_CPU_TARGET: String(ctx.input.hpaCpuTarget),
+        APP_HPA_MEMORY_TARGET: String(ctx.input.hpaMemoryTarget),
       };
       for (const [name, value] of Object.entries(variables)) {
         const variablePath = `/repos/${appRepo.owner}/${appRepo.repo}/actions/variables`;

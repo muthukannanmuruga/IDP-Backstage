@@ -40,6 +40,14 @@ jobs:
       APP_MEMORY: ${{ '${{' }} vars.APP_MEMORY }}
       APP_INGRESS: ${{ '${{' }} vars.APP_INGRESS }}
       APP_HPA: ${{ '${{' }} vars.APP_HPA }}
+      APP_ALB_SCHEME: ${{ '${{' }} vars.APP_ALB_SCHEME }}
+      APP_INGRESS_HOST: ${{ '${{' }} vars.APP_INGRESS_HOST }}
+      APP_INGRESS_PATH: ${{ '${{' }} vars.APP_INGRESS_PATH }}
+      APP_INGRESS_SERVICE_PORT: ${{ '${{' }} vars.APP_INGRESS_SERVICE_PORT }}
+      APP_HPA_MIN_REPLICAS: ${{ '${{' }} vars.APP_HPA_MIN_REPLICAS }}
+      APP_HPA_MAX_REPLICAS: ${{ '${{' }} vars.APP_HPA_MAX_REPLICAS }}
+      APP_HPA_CPU_TARGET: ${{ '${{' }} vars.APP_HPA_CPU_TARGET }}
+      APP_HPA_MEMORY_TARGET: ${{ '${{' }} vars.APP_HPA_MEMORY_TARGET }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -115,8 +123,26 @@ jobs:
                     image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
                     ports:
                       - containerPort: 8080
+                    env:
+                      - name: OTEL_SERVICE_NAME
+                        value: "$ECR_REPOSITORY"
+                      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                        value: "http://otel-collector.monitoring.svc.cluster.local:4317"
+                      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+                        value: "grpc"
+                      - name: OTEL_METRICS_EXPORTER
+                        value: "otlp"
+                      - name: OTEL_TRACES_EXPORTER
+                        value: "none"
+                      - name: OTEL_LOGS_EXPORTER
+                        value: "none"
+                      - name: OTEL_RESOURCE_ATTRIBUTES
+                        value: "service.version=$IMAGE_TAG,deployment.environment=$APP_ENVIRONMENT"
                     resources:
                       requests:
+                        cpu: $APP_CPU
+                        memory: $APP_MEMORY
+                      limits:
                         cpu: $APP_CPU
                         memory: $APP_MEMORY
           EOF
@@ -134,27 +160,39 @@ jobs:
                 targetPort: 8080
           EOF
           if [ "$APP_INGRESS" = "true" ]; then
+            : "${APP_ALB_SCHEME:?APP_ALB_SCHEME is required}"
+            : "${APP_INGRESS_HOST:?APP_INGRESS_HOST is required}"
+            : "${APP_INGRESS_PATH:?APP_INGRESS_PATH is required}"
+            : "${APP_INGRESS_SERVICE_PORT:?APP_INGRESS_SERVICE_PORT is required}"
             cat > "$gitops_path/ingress.yaml" <<EOF
           apiVersion: networking.k8s.io/v1
           kind: Ingress
           metadata:
             name: $ECR_REPOSITORY
             namespace: $APP_NAMESPACE
+            annotations:
+              alb.ingress.kubernetes.io/scheme: $APP_ALB_SCHEME
+              alb.ingress.kubernetes.io/target-type: ip
           spec:
+            ingressClassName: alb
             rules:
-              - host: $ECR_REPOSITORY.local
+              - host: $APP_INGRESS_HOST
                 http:
                   paths:
-                    - path: /
+                    - path: $APP_INGRESS_PATH
                       pathType: Prefix
                       backend:
                         service:
                           name: $ECR_REPOSITORY
                           port:
-                            number: 80
+                            number: $APP_INGRESS_SERVICE_PORT
           EOF
           fi
           if [ "$APP_HPA" = "true" ]; then
+            : "${APP_HPA_MIN_REPLICAS:?APP_HPA_MIN_REPLICAS is required}"
+            : "${APP_HPA_MAX_REPLICAS:?APP_HPA_MAX_REPLICAS is required}"
+            : "${APP_HPA_CPU_TARGET:?APP_HPA_CPU_TARGET is required}"
+            : "${APP_HPA_MEMORY_TARGET:?APP_HPA_MEMORY_TARGET is required}"
             cat > "$gitops_path/hpa.yaml" <<EOF
           apiVersion: autoscaling/v2
           kind: HorizontalPodAutoscaler
@@ -166,15 +204,21 @@ jobs:
               apiVersion: apps/v1
               kind: Deployment
               name: $ECR_REPOSITORY
-            minReplicas: 1
-            maxReplicas: 10
+            minReplicas: $APP_HPA_MIN_REPLICAS
+            maxReplicas: $APP_HPA_MAX_REPLICAS
             metrics:
               - type: Resource
                 resource:
                   name: cpu
                   target:
                     type: Utilization
-                    averageUtilization: 70
+                    averageUtilization: $APP_HPA_CPU_TARGET
+              - type: Resource
+                resource:
+                  name: memory
+                  target:
+                    type: Utilization
+                    averageUtilization: $APP_HPA_MEMORY_TARGET
           EOF
           fi
 

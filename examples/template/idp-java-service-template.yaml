@@ -103,11 +103,72 @@ spec:
         ingress:
           title: Enable ingress
           type: boolean
-          default: false
+          default: true
         hpa:
           title: Enable horizontal pod autoscaling
           type: boolean
-          default: false
+          default: true
+    - title: Ingress
+      required:
+        - albScheme
+        - ingressHost
+        - ingressPath
+        - ingressServicePort
+      properties:
+        albScheme:
+          title: ALB exposure
+          type: string
+          enum:
+            - internal
+            - internet-facing
+          enumNames:
+            - Internal
+            - Internet-facing
+          default: internal
+        ingressHost:
+          title: Host
+          type: string
+          description: Public hostname routed to this service, e.g. java-service.example.com.
+        ingressPath:
+          title: Path
+          type: string
+          default: /
+        ingressServicePort:
+          title: Service port
+          type: integer
+          description: Port on the existing Kubernetes Service that the ALB routes to.
+          default: 80
+          minimum: 1
+          maximum: 65535
+    - title: Autoscaling
+      required:
+        - hpaMinReplicas
+        - hpaMaxReplicas
+        - hpaCpuTarget
+        - hpaMemoryTarget
+      properties:
+        hpaMinReplicas:
+          title: Minimum replicas
+          type: integer
+          default: 2
+          minimum: 1
+        hpaMaxReplicas:
+          title: Maximum replicas
+          type: integer
+          default: 10
+          minimum: 1
+        hpaCpuTarget:
+          title: CPU target utilization (%)
+          type: integer
+          default: 70
+          minimum: 1
+          maximum: 100
+        hpaMemoryTarget:
+          title: Memory target utilization (%)
+          type: integer
+          default: 80
+          minimum: 1
+          maximum: 100
     - title: Repository
       required:
         - repoUrl
@@ -160,6 +221,14 @@ spec:
         memory: ${{ parameters.memory }}
         ingress: ${{ parameters.ingress }}
         hpa: ${{ parameters.hpa }}
+        albScheme: ${{ parameters.albScheme }}
+        ingressHost: ${{ parameters.ingressHost }}
+        ingressPath: ${{ parameters.ingressPath }}
+        ingressServicePort: ${{ parameters.ingressServicePort }}
+        hpaMinReplicas: ${{ parameters.hpaMinReplicas }}
+        hpaMaxReplicas: ${{ parameters.hpaMaxReplicas }}
+        hpaCpuTarget: ${{ parameters.hpaCpuTarget }}
+        hpaMemoryTarget: ${{ parameters.hpaMemoryTarget }}
     - id: register
       name: Register service in catalog
       action: catalog:register
