@@ -211,10 +211,46 @@ export const createIdpProvisionServiceAction = () =>
         body: JSON.stringify({ encrypted_value: Buffer.from(encrypted).toString('base64'), key_id: key.key_id }),
       });
 
-      await githubRequest(githubToken, `/repos/${appRepo.owner}/${appRepo.repo}/actions/workflows/ci.yml/dispatches`, {
-        method: 'POST',
-        body: JSON.stringify({ ref: 'main' }),
-      });
+      // GitHub can accept a dispatch (204) without ever queuing a visible run if the
+      // workflow file isn't fully indexed yet, so verify a run actually shows up and
+      // re-dispatch if it doesn't, instead of trusting the 204 response alone.
+      const dispatchedAt = Date.now();
+      let runVisible = false;
+      let lastDispatchError: unknown;
+      for (let attempt = 0; attempt < 4 && !runVisible; attempt += 1) {
+        if (attempt > 0) await sleep(5000);
+        try {
+          await githubRequest(githubToken, `/repos/${appRepo.owner}/${appRepo.repo}/actions/workflows/ci.yml/dispatches`, {
+            method: 'POST',
+            body: JSON.stringify({ ref: 'main' }),
+          });
+          ctx.logger.info(`Requested ci.yml workflow_dispatch (attempt ${attempt + 1})`);
+        } catch (error) {
+          lastDispatchError = error;
+          ctx.logger.warn(`workflow_dispatch request failed (attempt ${attempt + 1}): ${String(error)}`);
+          continue;
+        }
+
+        for (let check = 0; check < 4 && !runVisible; check += 1) {
+          await sleep(3000);
+          const runs = await githubRequest<{ workflow_runs: { event: string; created_at: string; html_url: string }[] }>(
+            githubToken,
+            `/repos/${appRepo.owner}/${appRepo.repo}/actions/runs?event=workflow_dispatch&branch=main`,
+          );
+          const queued = runs.workflow_runs.find(run => new Date(run.created_at).getTime() >= dispatchedAt - 2000);
+          if (queued) {
+            runVisible = true;
+            ctx.logger.info(`ci.yml workflow_dispatch run queued: ${queued.html_url}`);
+          }
+        }
+      }
+      if (!runVisible) {
+        ctx.logger.warn(
+          `ci.yml did not visibly re-run after dispatch (${String(lastDispatchError)}). ` +
+            `Infrastructure and the GitHub repository were still provisioned successfully; ` +
+            `manually re-run the "CI/CD" workflow from the Actions tab of ${appRepo.owner}/${appRepo.repo}.`,
+        );
+      }
       ctx.output('terraformRunId', run.id);
       ctx.output('roleArn', roleArn);
       ctx.output('repositoryUrl', `https://github.com/${appRepo.owner}/${appRepo.repo}`);
