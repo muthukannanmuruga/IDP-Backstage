@@ -1,5 +1,6 @@
 import { createTemplateAction } from '@backstage/plugin-scaffolder-node';
 import sodium from 'tweetsodium';
+import { execFileSync } from 'node:child_process';
 
 const sleep = (milliseconds: number) =>
   new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -12,6 +13,51 @@ function parseRepoUrl(repoUrl: string) {
     throw new Error(`Invalid repository URL: ${repoUrl}`);
   }
   return { owner, repo };
+}
+
+// Argo CD runs in-cluster and can't read the GitHub Actions secrets stored on app repos,
+// so it needs its own copy of the same GITOPS_TOKEN registered as a Kubernetes Secret.
+// This reuses the token the backend already holds - no separate secret store to configure.
+function ensureArgoCdRepoCredentials(
+  ctx: { logger: { info: (msg: string) => void; warn: (msg: string) => void } },
+  gitopsRepository: string,
+  gitopsToken: string,
+) {
+  const clusterName = process.env.EKS_CLUSTER_NAME ?? 'idp-dev-eks';
+  const awsRegion = process.env.AWS_REGION ?? 'us-east-1';
+  try {
+    execFileSync('aws', ['eks', 'update-kubeconfig', '--name', clusterName, '--region', awsRegion], { stdio: 'ignore' });
+
+    let exists = false;
+    try {
+      execFileSync('kubectl', ['get', 'secret', 'idp-gitops-repo', '-n', 'argocd'], { stdio: 'ignore' });
+      exists = true;
+    } catch {
+      exists = false;
+    }
+    if (exists) {
+      ctx.logger.info('Argo CD GitOps repository credentials already registered, skipping.');
+      return;
+    }
+
+    execFileSync('kubectl', [
+      'create', 'secret', 'generic', 'idp-gitops-repo', '-n', 'argocd',
+      '--from-literal=type=git',
+      `--from-literal=url=https://github.com/${gitopsRepository}.git`,
+      '--from-literal=username=x-access-token',
+      `--from-literal=password=${gitopsToken}`,
+    ], { stdio: 'ignore' });
+    execFileSync('kubectl', [
+      'label', 'secret', 'idp-gitops-repo', '-n', 'argocd',
+      'argocd.argoproj.io/secret-type=repository', '--overwrite',
+    ], { stdio: 'ignore' });
+    ctx.logger.info('Registered Argo CD GitOps repository credentials in the cluster.');
+  } catch (error) {
+    ctx.logger.warn(
+      `Could not automatically register Argo CD repo credentials (${String(error)}). ` +
+        'Argo CD sync status may show Unknown until this secret exists in the argocd namespace.',
+    );
+  }
 }
 
 async function githubRequest<T>(token: string, path: string, init: RequestInit = {}) {
@@ -184,6 +230,7 @@ export const createIdpProvisionServiceAction = () =>
         APP_HPA_MEMORY_TARGET: String(ctx.input.hpaMemoryTarget),
       };
       for (const [name, value] of Object.entries(variables)) {
+        if (value === '') continue; // GitHub rejects empty repository variable values
         const variablePath = `/repos/${appRepo.owner}/${appRepo.repo}/actions/variables`;
         try {
           await githubRequest(githubToken, variablePath, {
@@ -210,6 +257,8 @@ export const createIdpProvisionServiceAction = () =>
         method: 'PUT',
         body: JSON.stringify({ encrypted_value: Buffer.from(encrypted).toString('base64'), key_id: key.key_id }),
       });
+
+      ensureArgoCdRepoCredentials(ctx, variables.GITOPS_REPOSITORY, gitopsToken);
 
       // GitHub can accept a dispatch (204) without ever queuing a visible run if the
       // workflow file isn't fully indexed yet, so verify a run actually shows up and
